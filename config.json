@@ -1,0 +1,63 @@
+{
+  "data_files": {
+    "data_transfer"       : "data_transfer.xlsx",
+    "data_route"          : "data_route.xlsx",
+    "data_demand"         : "data_demand.xlsx",
+    "data_func"           : "data_func.xlsx"
+  },
+
+  "data_contents": {
+    "data_transfer": {
+      "elem_local"          : "HUB",
+      "col_dur_arr"         : "ElapsedTime1",
+      "col_dur_dep"         : "ElapsedTime2",
+      "col_time_arr"        : "Arr Time",
+      "col_time_dep"        : "Dep Time",
+      "col_no_arr"          : "FlNo1",
+      "col_no_dep"          : "FlNo2",
+      "col_port_transf"     : "Arr1",
+      "col_od"              : "O&D",
+      "col_day"             : "Day"
+    },
+
+    "data_route": {
+      "col_no"              : "FlNo",
+      "col_port_orig"       : "Orig",
+      "col_port_dest"       : "Dest",
+      "col_pairs"           : "Pair"
+    },
+
+    "data_demand": {
+      "col_port_orig"       : "Orig Airport Code",
+      "col_port_dest"       : "Dest Airport Code",
+      "col_demand"          : "OD importance factor"
+    },
+
+    "data_func": {
+      "n_comp"              : "Competitors",
+      "rank_init"           : "Initial Rank",
+      "rank_ulti"           : "Final Rank",
+      "weight"              : "Weight"
+    }
+  },
+
+  "consts": {
+    "NAME_SOLVER"         : "gurobi",
+    "DUR_MIN_TRANSF"      : 50,
+    "DUR_MAX_TRANSF"      : 280,
+    "DUR_MIN_PORT"        : 40,
+    "MGN_TIM_PORT"        : 50,
+    "DEV_TIM_PROG"        : 20,
+    "RTO_2WAY"            : 0.25,
+    "DEV_GTG_2WAY"        : 40,
+    "INT_TIM"             : 15,
+    "CAP_ARR"             : 3,
+    "CAP_DEP"             : 2,
+    "EPS"                 : 0.5,
+    "LIM_TIM_SOLVE"       : 600,
+    "LIM_TIM_START"       : 120,
+    "GRB_CUTS"            : 1,
+    "GRB_HEURISTICS"      : 0.2,
+    "GRB_PRESOLVE"        : 2
+  }
+}

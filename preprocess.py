@@ -48,7 +48,6 @@ def _get_markets(df, cap_comp):
 
 def _get_prog_no_uniq(df, col_no, col_time, col_day = data_transfer["col_day"]):
     d = df[[col_no, col_day, col_time]].copy()
-    if pd.api.types.is_datetime64_any_dtype(d[col_time]): d[col_time] = d[col_time].dt.hour * 60 + d[col_time].dt.minute
     d["day"] = (d[col_time] // 1440).astype(int)
     d["clock"] = d[col_time] - d["day"] * 1440
     d = d.sort_values("day").drop_duplicates([col_no, col_day], keep="first")
@@ -86,8 +85,8 @@ def preprocess(dict_data):
     markets = _get_markets(df_transfer_space, cap_comp)
 
     df_transfer_local = df_transfer_space[df_transfer_space[data_transfer["col_port_transf"]] == data_transfer["elem_local"]].reset_index(drop=True)
-    prog_no_arr = _get_prog_no_uniq(df_transfer_local, data_transfer["col_no_arr"], data_transfer["col_time_arr"])
-    prog_no_dep = _get_prog_no_uniq(df_transfer_local, data_transfer["col_no_dep"], data_transfer["col_time_dep"])
+    prog_no_arr = _get_prog_no_uniq(df_transfer_local, data_transfer["col_no_arr"], "time_arr")
+    prog_no_dep = _get_prog_no_uniq(df_transfer_local, data_transfer["col_no_dep"], "time_dep")
 
     mgn_arr = _get_mgn(prog_no_arr, consts.MGN_TIM_PORT, consts.DEV_TIM_PROG)
     mgn_dep = _get_mgn(prog_no_dep, consts.MGN_TIM_PORT, consts.DEV_TIM_PROG)

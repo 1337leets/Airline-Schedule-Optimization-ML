@@ -42,7 +42,7 @@
   },
 
   "consts": {
-    "NAME_SOLVER"         : "gurobi",
+    "NAME_SOLVER"         : "highs",
     "DUR_MIN_TRANSF"      : 50,
     "DUR_MAX_TRANSF"      : 280,
     "DUR_MIN_PORT"        : 40,
@@ -54,8 +54,8 @@
     "CAP_ARR"             : 3,
     "CAP_DEP"             : 2,
     "EPS"                 : 0.5,
-    "LIM_TIM_SOLVE"       : 600,
-    "LIM_TIM_START"       : 120,
+    "LIM_TIM_SOLVE"       : 300,
+    "LIM_TIM_START"       : 60,
     "GRB_CUTS"            : 1,
     "GRB_HEURISTICS"      : 0.2,
     "GRB_PRESOLVE"        : 2

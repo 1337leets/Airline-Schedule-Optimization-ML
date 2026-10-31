@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import tempfile
 
 import log
 
@@ -31,7 +32,7 @@ def _extract_rotations(D):
     for (no, day) in D["prog_no_arr"]: by_arr.setdefault(no, set()).add(day)
 
     rot = []
-    for _, grp in D["df_route"].groupby("Pair"):
+    for _, grp in D["df_route"].groupby(data_route["col_pairs"]):
         arrs = sorted(set(grp[grp[data_route["col_port_dest"]] == data_transfer["elem_local"]][data_route["col_no"]]))
         deps = sorted(set(grp[grp[data_route["col_port_orig"]] == data_transfer["elem_local"]][data_route["col_no"]]))
         if not deps or not arrs: continue
@@ -66,7 +67,8 @@ def _add_hard_cons(m, D):
             m.bkt[(tag, key)] = bv
             m.con_hub.add(sum(bv.values()) == 1)
             m.con_hub.add(var[key] == sum(b * consts.INT_TIM * bv[b] for b in bset) + sv)
-            for b in bset: buckets.setdefault((key[1], b), []).append(bv[b])
+            slot0 = int((D["prog_no_arr"] if tag == "arr" else D["prog_no_dep"])[key][1] // consts.INT_TIM)
+            for b in bset: buckets.setdefault(slot0 + b, []).append(bv[b])
         for vs in buckets.values(): m.con_hub.add(sum(vs) <= cap)
     m.con_rot = pyo.ConstraintList()
     for k_dep, k_arr, need in D["rot"]: m.con_rot.add(m.var_arr[k_arr] + D["prog_no_arr"][k_arr][1] >= m.var_dep[k_dep] + D["prog_no_dep"][k_dep][1] + need)
@@ -79,6 +81,35 @@ def _add_hard_cons(m, D):
             ri += 1; rv = pyo.Var(); setattr(m, f"reg_ref_{ri}", rv)
             m.reg_ref[(tag, no)] = rv
             for day in days: m.con_reg.add(var[(no, day)] - rv <= consts.DEV_TIM_PROG / 2); m.con_reg.add(rv - var[(no, day)] <= consts.DEV_TIM_PROG / 2)
+
+
+def _off(D, no_arr, no_dep, day):
+    return D["prog_no_dep"][(no_dep, day)][1] - D["prog_no_arr"][(no_arr, day)][1]
+
+
+def _solve_highs(m, time_limit, mip_gap, warm, log_output=True):
+    """Run HiGHS on an LP export, which keeps the time limit reliable, and load the values back."""
+    import highspy
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "model.lp")
+        _, smap_id = m.write(path, io_options={"symbolic_solver_labels": False})
+        names = m.solutions.symbol_map[smap_id].bySymbol
+        h = highspy.Highs()
+        h.setOptionValue("output_flag", log_output)
+        h.setOptionValue("time_limit", float(time_limit))
+        h.setOptionValue("mip_rel_gap", float(mip_gap))
+        h.readModel(path)
+    cols = [names.get(name) for name in h.getLp().col_names_]
+    if warm:
+        sol = highspy.HighsSolution()
+        sol.col_value = [float(v.value) if v is not None and v.value is not None else 0. for v in cols]
+        h.setSolution(sol)
+    h.run()
+    status = h.modelStatusToString(h.getModelStatus())
+    if h.getInfo().primal_solution_status != 2: raise RuntimeError(f"HiGHS found no solution: {status}")
+    for v, x in zip(cols, h.getSolution().col_value):
+        if v is not None: v.value = round(x) if v.is_integer() or v.is_binary() else x
+    return SimpleNamespace(solver=SimpleNamespace(termination_condition=status.lower()))
 
 
 def _to_time(d):
@@ -104,17 +135,19 @@ def build(D):
             k_arr, k_dep = (r._asdict()[data_transfer["col_no_arr"]], day), (r._asdict()[data_transfer["col_no_dep"]], day)
             if k_arr not in D["prog_no_arr"] or k_dep not in D["prog_no_dep"]: continue
             (arr_min, arr_max), (dep_min, dep_max) = _calc_bounds(D, "arr", k_arr), _calc_bounds(D, "dep", k_dep)
-            if dep_max - arr_min < consts.DUR_MIN_TRANSF or dep_min - arr_max > consts.DUR_MAX_TRANSF: continue
+            off = _off(D, k_arr[0], k_dep[0], day)
+            if dep_max + off - arr_min < consts.DUR_MIN_TRANSF or dep_min + off - arr_max > consts.DUR_MAX_TRANSF: continue
             cand.append((od, day, k_arr[0], k_dep[0], float(r.dur_arr), float(r.dur_dep)))
     m.C = pyo.Set(initialize=range(len(cand)))
     m.var_y, m.var_below, m.var_above = pyo.Var(m.C, domain=pyo.Binary), pyo.Var(m.C, domain=pyo.Binary), pyo.Var(m.C, domain=pyo.Binary)
 
-    _gap_expr = lambda cand_i: m.var_dep[(cand[cand_i][3], cand[cand_i][1])] - m.var_arr[(cand[cand_i][2], cand[cand_i][1])]
+    _gap_expr = lambda cand_i: m.var_dep[(cand[cand_i][3], cand[cand_i][1])] - m.var_arr[(cand[cand_i][2], cand[cand_i][1])] + _off(D, cand[cand_i][2], cand[cand_i][3], cand[cand_i][1])
     _gtg_expr = lambda cand_i: cand[cand_i][4] + _gap_expr(cand_i) + cand[cand_i][5]
     def _calc_gap_bounds(cand_i):
         _, day, no_arr, no_dep, dur_arr, dur_dep = cand[cand_i]
         (arr_min, arr_max), (dep_min, dep_max) = _calc_bounds(D, "arr", (no_arr, day)), _calc_bounds(D, "dep", (no_dep, day))
-        gap_min, gap_max = dep_min - arr_max, dep_max - arr_min
+        off = _off(D, no_arr, no_dep, day)
+        gap_min, gap_max = dep_min + off - arr_max, dep_max + off - arr_min
         return gap_min, gap_max, dur_arr + gap_min + dur_dep, dur_arr + gap_max + dur_dep
 
     m.con_ind = pyo.ConstraintList()
@@ -210,7 +243,7 @@ def build(D):
 
 
 @log.start
-def start(D, time_limit = consts.LIM_TIM_START):
+def start(D, time_limit = consts.LIM_TIM_START, log_output=True):
     fm = pyo.ConcreteModel()
     _add_hard_cons(fm, D)
     fm.dev_arr, fm.dev_dep = pyo.Var(list(D["prog_no_arr"]), domain=pyo.NonNegativeReals), pyo.Var(list(D["prog_no_dep"]), domain=pyo.NonNegativeReals)
@@ -219,17 +252,15 @@ def start(D, time_limit = consts.LIM_TIM_START):
     for key, (c, _) in D["prog_no_dep"].items(): fm.con_dev.add(fm.var_dep[key] - c <= fm.dev_dep[key]); fm.con_dev.add(c - fm.var_dep[key] <= fm.dev_dep[key])
     fm.obj = pyo.Objective(expr=sum(fm.dev_arr.values()) + sum(fm.dev_dep.values()), sense=pyo.minimize)
 
-    opt = pyo.SolverFactory("appsi_highs")
-    opt.config.time_limit, opt.config.mip_gap, opt.config.stream_solver = time_limit, 0.5, True
-    opt.solve(fm)
+    _solve_highs(fm, time_limit, 0.5, False, log_output)
     arr0 = {key: pyo.value(fm.var_arr[key]) for key in D["prog_no_arr"]}
     dep0 = {key: pyo.value(fm.var_dep[key]) for key in D["prog_no_dep"]}
     return arr0, dep0, pyo.value(fm.obj)
 
 
 @log.solve
-def solve(D, m, cand, time_limit=consts.LIM_TIM_SOLVE, mip_gap=.01, warm=True):
-    arr0, dep0, _ = start(D)
+def solve(D, m, cand, time_limit=consts.LIM_TIM_SOLVE, mip_gap=.01, warm=True, log_output=True):
+    arr0, dep0, _ = start(D, log_output=log_output)
     for key, v in arr0.items(): m.var_arr[key].value = round(v)
     for key, v in dep0.items(): m.var_dep[key].value = round(v)
     for (tag, key), bv in m.bkt.items():
@@ -239,7 +270,7 @@ def solve(D, m, cand, time_limit=consts.LIM_TIM_SOLVE, mip_gap=.01, warm=True):
 
     gtg0 = {}
     for cand_i, (od, day, no_arr, no_dep, dur_arr, dur_dep) in enumerate(cand):
-        dur_gap = round(dep0[(no_dep, day)]) - round(arr0[(no_arr, day)])
+        dur_gap = round(dep0[(no_dep, day)]) - round(arr0[(no_arr, day)]) + _off(D, no_arr, no_dep, day)
         below, above = int(dur_gap < consts.DUR_MIN_TRANSF), int(dur_gap > consts.DUR_MAX_TRANSF)
         m.var_below[cand_i].value, m.var_above[cand_i].value = below, above
         m.var_y[cand_i].value = 1 - below - above
@@ -285,16 +316,14 @@ def solve(D, m, cand, time_limit=consts.LIM_TIM_SOLVE, mip_gap=.01, warm=True):
             for cand_i in cs: argmin_flags[(direction, cand_i)].value = 1 if cand_i in active else 0
             best_gtg[direction].value = min((gtg0[cand_i] for cand_i in active), default=best_gtg[direction].bounds[0])
 
-    solver = consts.NAME_SOLVER
-    opt = pyo.SolverFactory(solver)
-    if solver == "gurobi":
+    if consts.NAME_SOLVER == "gurobi":
+        opt = pyo.SolverFactory("gurobi")
         opt.options["TimeLimit"], opt.options["MIPGap"] = time_limit, mip_gap
         opt.options["Seed"], opt.options["Threads"] = 0, 8
         opt.options["NoRelHeurTime"], opt.options["MIPFocus"] = 60, 1
-        res = opt.solve(m, tee=True, warmstart=warm)
+        res = opt.solve(m, tee=log_output, warmstart=warm)
     else:
-        opt.config.time_limit, opt.config.mip_gap, opt.config.stream_solver = time_limit, mip_gap, True
-        res = opt.solve(m)
+        res = _solve_highs(m, time_limit, mip_gap, warm, log_output)
     return res
 
 
@@ -305,13 +334,13 @@ def extract(D, m, cand):
     sel = [dict(od=od, day=day, no_arr=no_arr, no_dep=no_dep,
                 t_arr=round(arr_c[(no_arr, day)] % 1440, 1), t_dep=round(dep_c[(no_dep, day)] % 1440, 1),
                 t_arr_time=_to_time(arr_c[(no_arr, day)]), t_dep_time=_to_time(dep_c[(no_dep, day)]),
-                gtg=round(dur_arr + (dep_c[(no_dep, day)] - arr_c[(no_arr, day)]) + dur_dep, 1))
+                gtg=round(dur_arr + (dep_c[(no_dep, day)] - arr_c[(no_arr, day)] + _off(D, no_arr, no_dep, day)) + dur_dep, 1))
            for cand_i, (od, day, no_arr, no_dep, dur_arr, dur_dep) in enumerate(cand) if pyo.value(m.var_y[cand_i]) > .5]
 
-    times = [dict(tip="arr", no=no, day=day, nominal=round(D["prog_no_arr"][(no, day)][0] % 1440, 1),
+    times = [dict(kind="arr", no=no, day=day, nominal=round(D["prog_no_arr"][(no, day)][0] % 1440, 1),
                   nominal_time=_to_time(D["prog_no_arr"][(no, day)][0]), new=round(clock % 1440, 1), new_time=_to_time(clock))
              for (no, day), clock in arr_c.items()]
-    times += [dict(tip="dep", no=no, day=day, nominal=round(D["prog_no_dep"][(no, day)][0] % 1440, 1),
+    times += [dict(kind="dep", no=no, day=day, nominal=round(D["prog_no_dep"][(no, day)][0] % 1440, 1),
                    nominal_time=_to_time(D["prog_no_dep"][(no, day)][0]), new=round(clock % 1440, 1), new_time=_to_time(clock))
               for (no, day), clock in dep_c.items()]
 
@@ -320,7 +349,9 @@ def extract(D, m, cand):
         gtgs = []
         for r in mk["rows"]:
             k_arr, k_dep = (r._asdict()[data_transfer["col_no_arr"]], day), (r._asdict()[data_transfer["col_no_dep"]], day)
-            if k_arr in arr_c and k_dep in dep_c: gtgs.append(r.dur_arr + (dep_c[k_dep] - arr_c[k_arr]) + r.dur_dep)
+            if k_arr not in arr_c or k_dep not in dep_c: continue
+            gap = dep_c[k_dep] - arr_c[k_arr] + _off(D, k_arr[0], k_dep[0], day)
+            if consts.DUR_MIN_TRANSF <= gap <= consts.DUR_MAX_TRANSF: gtgs.append(r.dur_arr + gap + r.dur_dep)
         beaten = sum(1 for tc in mk["comp"] if gtgs and min(gtgs) <= tc)
         per_mkt[(od, day)] = dict(k=len(gtgs), beat=beaten, rank=max(1, mk["n"] - beaten))
 
@@ -339,10 +370,10 @@ def export(result, out_path=None):
     df_obj = pd.DataFrame([dict(objective=result["obj"])])
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as xl:
-        df_sel.to_excel(xl, sheet_name="secilen_baglantilar", index=False)
-        df_tim.to_excel(xl, sheet_name="ayarlanan_saatler", index=False)
-        df_mkt.to_excel(xl, sheet_name="od_rakip_sonuclari", index=False)
-        df_obj.to_excel(xl, sheet_name="ozet", index=False)
+        df_sel.to_excel(xl, sheet_name="selected_connections", index=False)
+        df_tim.to_excel(xl, sheet_name="adjusted_times", index=False)
+        df_mkt.to_excel(xl, sheet_name="market_results", index=False)
+        df_obj.to_excel(xl, sheet_name="summary", index=False)
     return out_path
 
 ################################################################################################################################################################
